@@ -14,16 +14,16 @@ let globalDummyCanvas: HTMLCanvasElement | null = null;
 const createDummyVideoTrack = (): MediaStreamTrack => {
   if (!globalDummyCanvas) {
     globalDummyCanvas = document.createElement('canvas');
-    globalDummyCanvas.width = 1;
-    globalDummyCanvas.height = 1;
+    globalDummyCanvas.width = 2;
+    globalDummyCanvas.height = 2;
     const ctx = globalDummyCanvas.getContext('2d');
     if (ctx) {
       ctx.fillStyle = '#0a0a1a';
-      ctx.fillRect(0, 0, 1, 1);
+      ctx.fillRect(0, 0, 2, 2);
       // Animación a 1fps para evitar que WebRTC considere la pista como "muerta" o "silenciada"
       setInterval(() => {
         ctx.fillStyle = ctx.fillStyle === '#0a0a1a' ? '#0b0b1b' : '#0a0a1a';
-        ctx.fillRect(0, 0, 1, 1);
+        ctx.fillRect(0, 0, 2, 2);
       }, 1000);
     }
   }
@@ -224,49 +224,18 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         rawMicStreamRef.current = rawMicStream;
       }
 
-      // --- SETUP AUDIO MIXER ---
-      // Esto nos permite enviar un solo canal de audio que mezcle el micrófono + el audio de pantalla compartida.
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      const ac = new AudioContextClass();
-      audioCtxRef.current = ac;
-
-      const dest = ac.createMediaStreamDestination();
-      mixedStreamRef.current = dest.stream;
-
-      const micGain = ac.createGain();
-      micGain.gain.value = 1; 
-      micGain.connect(dest);
-      micGainRef.current = micGain;
-
-      const sysGain = ac.createGain();
-      sysGain.gain.value = 1;
-      sysGain.connect(dest);
-      systemGainRef.current = sysGain;
-
       const rawAudioTrack = rawMicStream.getAudioTracks()[0];
-      if (rawAudioTrack) {
-        const micSource = ac.createMediaStreamSource(new MediaStream([rawAudioTrack]));
-        micSource.connect(micGain);
-        micSourceRef.current = micSource;
-      }
-
-      // Prevenir suspensión del contexto de audio en navegadores estrictos
-      const resumeAc = () => { if (ac.state === 'suspended') ac.resume(); };
-      window.addEventListener('click', resumeAc);
-      window.addEventListener('touchstart', resumeAc);
-
-      // --- SETUP VIDEO DUMMY ---
-      // WebRTC necesita inicializar el "Sender" de video para que podamos cambiar a cámara/pantalla sin tener que renegociar.
       const dummyTrack = createDummyVideoTrack();
       dummyTrackRef.current = dummyTrack;
       currentVideoTrackRef.current = dummyTrack;
 
-      // --- FLUJO LOCAL ---
+      // --- FLUJO LOCAL DIRECTO (Sin Mixer inicialmente para evitar bugs en Safari) ---
       const finalStream = new MediaStream([
-        dest.stream.getAudioTracks()[0],
+        rawAudioTrack,
         dummyTrack
       ]);
       setLocalStream(finalStream);
+
 
       await enumerateDevices();
 
@@ -373,6 +342,19 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   };
 
   /* ---- Replace Track Helper ---- */
+  const replaceAudioTrackGlobally = (newTrack: MediaStreamTrack) => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach(t => localStream.removeTrack(t));
+      localStream.addTrack(newTrack);
+    }
+    Object.values(callsRef.current).forEach((call) => {
+      const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'audio');
+      if (sender) {
+        sender.replaceTrack(newTrack).catch(err => console.warn('replaceTrack audio failed:', err));
+      }
+    });
+  };
+
   const replaceVideoTrackGlobally = (newTrack: MediaStreamTrack) => {
     currentVideoTrackRef.current = newTrack;
     
@@ -396,11 +378,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
   /* ---- Botones de Control ---- */
   const toggleMute = () => {
-    // Apagamos el nodo de micrófono en el mixer, el sistema de audio sigue activo.
-    if (micGainRef.current) {
-      const currentlyMuted = micGainRef.current.gain.value === 0;
-      micGainRef.current.gain.value = currentlyMuted ? 1 : 0;
-      setIsMuted(!currentlyMuted);
+    // Mutear directamente la pista base silencia todo (incluso el mixer si está activo)
+    const track = rawMicStreamRef.current?.getAudioTracks()[0];
+    if (track) {
+      const nextState = !track.enabled;
+      track.enabled = nextState;
+      setIsMuted(!nextState);
     }
   };
 
@@ -453,6 +436,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       : dummyTrackRef.current;
     
     if (trackToRestore) replaceVideoTrackGlobally(trackToRestore);
+
+    // Restaurar audio crudo (sin mixer)
+    const rawAudio = rawMicStreamRef.current?.getAudioTracks()[0];
+    if (rawAudio) replaceAudioTrackGlobally(rawAudio);
   };
 
   const toggleScreenShare = async () => {
@@ -482,12 +469,40 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
         setScreenStream(stream);
 
-        // -- Inyectar Audio de Sistema al Mixer --
+        // -- Inyectar Audio de Sistema al Mixer (Solo si hay audio) --
         const screenAudioTrack = stream.getAudioTracks()[0];
-        if (screenAudioTrack && audioCtxRef.current && systemGainRef.current) {
-          const sysSource = audioCtxRef.current.createMediaStreamSource(new MediaStream([screenAudioTrack]));
-          sysSource.connect(systemGainRef.current);
+        let audioTrackToTransmit = rawMicStreamRef.current?.getAudioTracks()[0];
+
+        if (screenAudioTrack) {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (!audioCtxRef.current) audioCtxRef.current = new AudioContextClass();
+          const ac = audioCtxRef.current;
+          if (ac.state === 'suspended') ac.resume();
+
+          const dest = ac.createMediaStreamDestination();
+          mixedStreamRef.current = dest.stream;
+
+          const sysGain = ac.createGain();
+          sysGain.gain.value = sysVolume;
+          sysGain.connect(dest);
+          systemGainRef.current = sysGain;
+
+          const sysSource = ac.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+          sysSource.connect(sysGain);
           sysSourceRef.current = sysSource;
+
+          const micGain = ac.createGain();
+          micGain.gain.value = micVolume;
+          micGain.connect(dest);
+          micGainRef.current = micGain;
+
+          if (rawMicStreamRef.current) {
+            const micSource = ac.createMediaStreamSource(rawMicStreamRef.current);
+            micSource.connect(micGain);
+            micSourceRef.current = micSource;
+          }
+
+          audioTrackToTransmit = dest.stream.getAudioTracks()[0];
         }
 
         // -- Optimización extrema de fluidez (60/120fps sin lag) --
@@ -497,6 +512,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         }
 
         replaceVideoTrackGlobally(screenVideoTrack);
+        if (audioTrackToTransmit) {
+          replaceAudioTrackGlobally(audioTrackToTransmit);
+        }
 
         Object.values(callsRef.current).forEach((call) => {
           const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'video');
@@ -794,8 +812,8 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
     if (!video) return;
 
     const checkRes = () => {
-      // Chrome a veces reporta 0x0 antes de cargar, o 1x1 para el dummy
-      setIsDummy(video.videoWidth <= 1 || video.videoHeight <= 1);
+      // Chrome a veces reporta 0x0 antes de cargar, o 2x2 para el dummy
+      setIsDummy(video.videoWidth <= 2 || video.videoHeight <= 2);
     };
 
     checkRes();
@@ -813,12 +831,16 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
 
   useEffect(() => {
     if (stream) {
-      if (videoRef.current) videoRef.current.srcObject = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(e => console.warn('Video Autoplay bloqueado por el navegador', e));
+      }
       if (audioRef.current) {
         audioRef.current.srcObject = stream;
         if (speakerDeviceId && 'setSinkId' in audioRef.current) {
           (audioRef.current as any).setSinkId(speakerDeviceId).catch(() => {});
         }
+        audioRef.current.play().catch(e => console.warn('Audio Autoplay bloqueado por el navegador', e));
       }
     }
   }, [stream, speakerDeviceId]);
