@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback, use } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   Mic, MicOff, Video, VideoOff, MonitorUp, PhoneOff,
-  Settings, Maximize, Copy, Users, X
+  Settings, Maximize, Copy, Users, X, Volume2
 } from 'lucide-react';
 import type Peer from 'peerjs';
 import type { MediaConnection } from 'peerjs';
@@ -107,6 +107,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const [showSettings, setShowSettings] = useState(false);
   const [toast, setToast] = useState('');
 
+  // Volúmenes Locales
+  const [micVolume, setMicVolume] = useState(1);
+  const [sysVolume, setSysVolume] = useState(1);
+
   // Dispositivos y Calidad
   const [audioInputs, setAudioInputs] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputs, setAudioOutputs] = useState<MediaDeviceInfo[]>([]);
@@ -144,6 +148,19 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const dummyTrackRef = useRef<MediaStreamTrack | null>(null);
 
   const isSpeaking = useAudioVolume(localStream);
+
+  // Efectos para sincronizar volumen
+  useEffect(() => {
+    if (micGainRef.current) {
+      micGainRef.current.gain.value = isMuted ? 0 : micVolume;
+    }
+  }, [micVolume, isMuted]);
+
+  useEffect(() => {
+    if (systemGainRef.current) {
+      systemGainRef.current.gain.value = sysVolume;
+    }
+  }, [sysVolume]);
 
   /* ---- Show Toast ---- */
   const showToast = useCallback((msg: string) => {
@@ -626,6 +643,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                     <option key={d.deviceId} value={d.deviceId}>{d.label || `Micrófono ${d.deviceId.slice(0, 5)}`}</option>
                   ))}
                 </select>
+                <div style={{ marginTop: '12px' }}>
+                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Volumen de tu Voz</label>
+                  <input 
+                    type="range" min="0" max="2" step="0.1" 
+                    value={micVolume} onChange={(e) => setMicVolume(parseFloat(e.target.value))}
+                    style={{ width: '100%', marginTop: '5px' }}
+                  />
+                </div>
               </div>
 
               <div className="settings-section">
@@ -659,6 +684,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                       <div className="sublabel">{r.w}×{r.h}</div>
                     </div>
                   ))}
+                </div>
+                <div style={{ marginTop: '15px' }}>
+                  <label style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Volumen de Transmisión (Juego/PC)</label>
+                  <input 
+                    type="range" min="0" max="2" step="0.1" 
+                    value={sysVolume} onChange={(e) => setSysVolume(parseFloat(e.target.value))}
+                    style={{ width: '100%', marginTop: '5px' }}
+                  />
                 </div>
               </div>
 
@@ -694,8 +727,17 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
   const containerRef = useRef<HTMLDivElement>(null);
   const isSpeaking = useAudioVolume(stream);
 
+  const [volume, setVolume] = useState(1);
+  const [showVolume, setShowVolume] = useState(false);
+
   const videoTrack = stream.getVideoTracks()[0];
   const hasRealVideo = videoTrack && videoTrack.enabled && !videoTrack.muted && videoTrack.readyState === 'live';
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
 
   useEffect(() => {
     if (stream) {
@@ -730,6 +772,16 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
 
       <div className="tile-label">{nickname}</div>
       <div className="tile-actions">
+        {showVolume && (
+          <input 
+            type="range" min="0" max="1" step="0.05"
+            value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))}
+            style={{ width: '70px', marginRight: '8px', cursor: 'pointer' }}
+          />
+        )}
+        <button className="tile-action-btn" onClick={() => setShowVolume(!showVolume)} title="Ajustar Volumen">
+          <Volume2 size={14} />
+        </button>
         <button
           className="tile-action-btn"
           onClick={() => {
