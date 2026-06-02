@@ -412,8 +412,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
           sysSourceRef.current = sysSource;
         }
 
-        // -- Inyectar Video --
+        // -- Optimización extrema de fluidez (60/120fps sin lag) --
         const screenVideoTrack = stream.getVideoTracks()[0];
+        if ('contentHint' in screenVideoTrack) {
+          screenVideoTrack.contentHint = 'motion'; // Fuerza al navegador a priorizar FPS sobre nitidez de píxel
+        }
+
         replaceVideoTrackGlobally(screenVideoTrack);
         if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
 
@@ -423,9 +427,15 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             try {
               const params = sender.getParameters();
               if (params.encodings?.[0]) {
-                params.encodings[0].maxBitrate = res.w >= 3840 ? 15000000 : res.w >= 1920 ? 8000000 : 4000000;
-                sender.setParameters(params);
+                // Bitrates mucho más altos (50Mbps para 4K, 15Mbps para 1080p)
+                const targetBitrate = res.w >= 3840 ? 50000000 : res.w >= 1920 ? 15000000 : 8000000;
+                params.encodings[0].maxBitrate = targetBitrate;
+                params.encodings[0].maxFramerate = selectedFps;
               }
+              // Obliga a WebRTC a NO sacrificar fotogramas si la red baja un poco, sino sacrificar resolución estática temporalmente
+              (params as any).degradationPreference = 'maintain-framerate';
+              
+              sender.setParameters(params);
             } catch { /* ignore */ }
           }
         });
