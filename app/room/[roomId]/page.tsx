@@ -192,12 +192,21 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     const init = async () => {
       let rawMicStream: MediaStream;
       try {
-        // Pedimos acceso real al micrófono
         rawMicStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
         rawMicStreamRef.current = rawMicStream;
-      } catch {
-        alert('Se necesita permiso de micrófono para continuar.');
-        return;
+      } catch (err) {
+        console.warn('Microphone failed or denied, using silent track to keep app running.', err);
+        // Create a silent audio track as fallback so the app DOES NOT crash
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const fallbackAc = new AudioContextClass();
+        const oscillator = fallbackAc.createOscillator();
+        const dst = fallbackAc.createMediaStreamDestination();
+        oscillator.connect(dst);
+        oscillator.start();
+        const silentTrack = dst.stream.getAudioTracks()[0];
+        silentTrack.enabled = false; // mute it
+        rawMicStream = new MediaStream([silentTrack]);
+        rawMicStreamRef.current = rawMicStream;
       }
 
       // --- SETUP AUDIO MIXER ---
@@ -248,7 +257,18 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
       // --- WEBRTC PEERJS ---
       const PeerJS = (await import('peerjs')).default;
-      currentPeer = new PeerJS();
+      currentPeer = new PeerJS({
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' }
+          ]
+        }
+      });
       peerRef.current = currentPeer;
 
       currentPeer.on('open', (id) => {
