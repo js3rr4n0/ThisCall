@@ -137,6 +137,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const sysSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const mixedStreamRef = useRef<MediaStream | null>(null);
+  const rawMicStreamRef = useRef<MediaStream | null>(null);
 
   const currentVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -176,6 +177,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       try {
         // Pedimos acceso real al micrófono
         rawMicStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+        rawMicStreamRef.current = rawMicStream;
       } catch {
         alert('Se necesita permiso de micrófono para continuar.');
         return;
@@ -469,6 +471,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     setSelectedMic(deviceId);
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } });
+      rawMicStreamRef.current = newStream;
       const newTrack = newStream.getAudioTracks()[0];
 
       if (micSourceRef.current) {
@@ -686,7 +689,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
 /* ========== REMOTE VIDEO TILE ========== */
 function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream; nickname: string; speakerDeviceId: string }) {
-  const ref = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isSpeaking = useAudioVolume(stream);
 
@@ -694,20 +698,25 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
   const hasRealVideo = videoTrack && videoTrack.enabled && !videoTrack.muted && videoTrack.readyState === 'live';
 
   useEffect(() => {
-    if (ref.current && stream) {
-      ref.current.srcObject = stream;
-      if (speakerDeviceId && 'setSinkId' in ref.current) {
-        (ref.current as any).setSinkId(speakerDeviceId).catch(() => {});
+    if (stream) {
+      if (videoRef.current) videoRef.current.srcObject = stream;
+      if (audioRef.current) {
+        audioRef.current.srcObject = stream;
+        if (speakerDeviceId && 'setSinkId' in audioRef.current) {
+          (audioRef.current as any).setSinkId(speakerDeviceId).catch(() => {});
+        }
       }
     }
   }, [stream, speakerDeviceId]);
 
   return (
     <div ref={containerRef} className={`video-tile ${isSpeaking ? 'speaking' : ''}`}>
+      <audio ref={audioRef} autoPlay playsInline />
       <video 
-        ref={ref} 
+        ref={videoRef} 
         autoPlay 
-        playsInline 
+        playsInline
+        muted
         data-remote 
         style={hasRealVideo ? { display: 'block' } : { width: 0, height: 0, opacity: 0, position: 'absolute', pointerEvents: 'none' }} 
       />
