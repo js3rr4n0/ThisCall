@@ -16,7 +16,7 @@ const createDummyVideoTrack = (): MediaStreamTrack => {
   canvas.height = 1;
   const ctx = canvas.getContext('2d');
   if (ctx) {
-    ctx.fillStyle = '#0a0a1a'; // fondo oscuro
+    ctx.fillStyle = '#0a0a1a';
     ctx.fillRect(0, 0, 1, 1);
   }
   return canvas.captureStream(1).getVideoTracks()[0];
@@ -36,7 +36,8 @@ function useAudioVolume(stream: MediaStream | null) {
     let source: MediaStreamAudioSourceNode | null = null;
 
     try {
-      audioContext = new window.AudioContext();
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      audioContext = new AudioContextClass();
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
       analyser.smoothingTimeConstant = 0.5;
@@ -121,7 +122,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   // Remotos
   const [remoteStreams, setRemoteStreams] = useState<Record<string, { stream: MediaStream; nickname: string }>>({});
 
-  // Referencias mutables
+  // Referencias de UI y WebRTC
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localContainerRef = useRef<HTMLDivElement>(null);
   const callsRef = useRef<Record<string, MediaConnection>>({});
@@ -129,7 +130,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const peerRef = useRef<Peer | null>(null);
   const initRef = useRef(false);
 
-  // Tracks activos locales para WebRTC
+  // Tracks y Mixer de Audio (Solución para mezclar Mic y Pantalla)
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const micGainRef = useRef<GainNode | null>(null);
+  const systemGainRef = useRef<GainNode | null>(null);
+  const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const sysSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const mixedStreamRef = useRef<MediaStream | null>(null);
+
   const currentVideoTrackRef = useRef<MediaStreamTrack | null>(null);
   const cameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const dummyTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -164,25 +172,62 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     setNickname(storedNickname);
 
     const init = async () => {
-      let stream: MediaStream;
+      let rawMicStream: MediaStream;
       try {
-        // Pedimos solo audio inicialmente
-        stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+        // Pedimos acceso real al micrófono
+        rawMicStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
       } catch {
         alert('Se necesita permiso de micrófono para continuar.');
         return;
       }
 
-      // Creamos un track de video oscuro "dummy" para que WebRTC negocie video desde el inicio
+      // --- SETUP AUDIO MIXER ---
+      // Esto nos permite enviar un solo canal de audio que mezcle el micrófono + el audio de pantalla compartida.
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const ac = new AudioContextClass();
+      audioCtxRef.current = ac;
+
+      const dest = ac.createMediaStreamDestination();
+      mixedStreamRef.current = dest.stream;
+
+      const micGain = ac.createGain();
+      micGain.gain.value = 1; 
+      micGain.connect(dest);
+      micGainRef.current = micGain;
+
+      const sysGain = ac.createGain();
+      sysGain.gain.value = 1;
+      sysGain.connect(dest);
+      systemGainRef.current = sysGain;
+
+      const rawAudioTrack = rawMicStream.getAudioTracks()[0];
+      if (rawAudioTrack) {
+        const micSource = ac.createMediaStreamSource(new MediaStream([rawAudioTrack]));
+        micSource.connect(micGain);
+        micSourceRef.current = micSource;
+      }
+
+      // Prevenir suspensión del contexto de audio en navegadores estrictos
+      const resumeAc = () => { if (ac.state === 'suspended') ac.resume(); };
+      window.addEventListener('click', resumeAc);
+      window.addEventListener('touchstart', resumeAc);
+
+      // --- SETUP VIDEO DUMMY ---
+      // WebRTC necesita inicializar el "Sender" de video para que podamos cambiar a cámara/pantalla sin tener que renegociar.
       const dummyTrack = createDummyVideoTrack();
       dummyTrackRef.current = dummyTrack;
-      stream.addTrack(dummyTrack);
       currentVideoTrackRef.current = dummyTrack;
 
-      setLocalStream(stream);
+      // --- FLUJO LOCAL ---
+      const finalStream = new MediaStream([
+        dest.stream.getAudioTracks()[0],
+        dummyTrack
+      ]);
+      setLocalStream(finalStream);
 
       await enumerateDevices();
 
+      // --- WEBRTC PEERJS ---
       const PeerJS = (await import('peerjs')).default;
       currentPeer = new PeerJS();
       peerRef.current = currentPeer;
@@ -199,7 +244,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
             data.peers.forEach((p: any) => {
               if (p.peerId !== id && !callsRef.current[p.peerId]) {
-                const call = currentPeer.call(p.peerId, stream, {
+                const call = currentPeer.call(p.peerId, finalStream, {
                   metadata: { nickname: storedNickname },
                 });
                 handleCall(call);
@@ -215,7 +260,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       });
 
       currentPeer.on('call', (call) => {
-        call.answer(stream);
+        call.answer(finalStream);
         handleCall(call);
       });
     };
@@ -234,6 +279,9 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
           });
         }
         peerRef.current.destroy();
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+        audioCtxRef.current.close();
       }
     };
   }, [roomId, enumerateDevices]);
@@ -265,13 +313,11 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
   const replaceVideoTrackGlobally = (newTrack: MediaStreamTrack) => {
     currentVideoTrackRef.current = newTrack;
     
-    // 1. Reemplazar en el stream local
     if (localStream) {
       localStream.getVideoTracks().forEach(t => localStream.removeTrack(t));
       localStream.addTrack(newTrack);
     }
     
-    // 2. Reemplazar en todas las conexiones PeerJS
     Object.values(callsRef.current).forEach((call) => {
       const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'video');
       if (sender) {
@@ -282,11 +328,11 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
   /* ---- Botones de Control ---- */
   const toggleMute = () => {
-    if (!localStream) return;
-    const tracks = localStream.getAudioTracks();
-    if (tracks.length > 0) {
-      tracks[0].enabled = !tracks[0].enabled;
-      setIsMuted(!tracks[0].enabled);
+    // Apagamos el nodo de micrófono en el mixer, el sistema de audio sigue activo.
+    if (micGainRef.current) {
+      const currentlyMuted = micGainRef.current.gain.value === 0;
+      micGainRef.current.gain.value = currentlyMuted ? 1 : 0;
+      setIsMuted(!currentlyMuted);
     }
   };
 
@@ -294,7 +340,6 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     if (!localStream) return;
 
     if (isVideoOn) {
-      // APAGAR CÁMARA -> Restaurar el dummy
       if (cameraTrackRef.current) {
         cameraTrackRef.current.stop();
         cameraTrackRef.current = null;
@@ -305,7 +350,6 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         replaceVideoTrackGlobally(dummyTrackRef.current);
       }
     } else {
-      // ENCENDER CÁMARA
       try {
         const camStream = await navigator.mediaDevices.getUserMedia({
           video: selectedCamera ? { deviceId: { exact: selectedCamera } } : true,
@@ -316,7 +360,6 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
 
         if (!screenStream) {
           replaceVideoTrackGlobally(videoTrack);
-          // Asegurar que el tag de video local se entere del cambio (por si era un dummy stream sin imagen)
           if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
         }
       } catch (err) {
@@ -326,22 +369,28 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   };
 
-  const toggleScreenShare = async () => {
+  const disableScreenShareGlobally = () => {
     if (screenStream) {
-      // APAGAR SCREEN SHARE
       screenStream.getTracks().forEach(t => t.stop());
       setScreenStream(null);
+    }
+    
+    if (sysSourceRef.current) {
+      sysSourceRef.current.disconnect();
+      sysSourceRef.current = null;
+    }
 
-      // Restauramos la cámara o el dummy
-      const trackToRestore = (isVideoOn && cameraTrackRef.current) 
-        ? cameraTrackRef.current 
-        : dummyTrackRef.current;
-      
-      if (trackToRestore) {
-        replaceVideoTrackGlobally(trackToRestore);
-      }
+    const trackToRestore = (isVideoOn && cameraTrackRef.current) 
+      ? cameraTrackRef.current 
+      : dummyTrackRef.current;
+    
+    if (trackToRestore) replaceVideoTrackGlobally(trackToRestore);
+  };
+
+  const toggleScreenShare = async () => {
+    if (screenStream) {
+      disableScreenShareGlobally();
     } else {
-      // ENCENDER SCREEN SHARE
       try {
         const res = RESOLUTIONS[selectedRes];
         const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -350,16 +399,24 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             height: { ideal: res.h },
             frameRate: { ideal: selectedFps, max: selectedFps },
           },
-          audio: true,
+          audio: true, // Audio del sistema/pestaña
         });
 
         setScreenStream(stream);
 
-        const screenTrack = stream.getVideoTracks()[0];
-        replaceVideoTrackGlobally(screenTrack);
+        // -- Inyectar Audio de Sistema al Mixer --
+        const screenAudioTrack = stream.getAudioTracks()[0];
+        if (screenAudioTrack && audioCtxRef.current && systemGainRef.current) {
+          const sysSource = audioCtxRef.current.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+          sysSource.connect(systemGainRef.current);
+          sysSourceRef.current = sysSource;
+        }
+
+        // -- Inyectar Video --
+        const screenVideoTrack = stream.getVideoTracks()[0];
+        replaceVideoTrackGlobally(screenVideoTrack);
         if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
 
-        // Intentamos subir el bitrate si se comparte pantalla
         Object.values(callsRef.current).forEach((call) => {
           const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'video');
           if (sender) {
@@ -373,12 +430,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
           }
         });
 
-        screenTrack.onended = () => {
-          // Detectar cuando el usuario hace clic en "Dejar de compartir" desde la UI del navegador
-          setScreenStream(null);
-          const tr = (isVideoOn && cameraTrackRef.current) ? cameraTrackRef.current : dummyTrackRef.current;
-          if (tr) replaceVideoTrackGlobally(tr);
-        };
+        screenVideoTrack.onended = () => disableScreenShareGlobally();
       } catch (err) {
         console.error('Screen share error', err);
       }
@@ -392,16 +444,16 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       const newStream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } } });
       const newTrack = newStream.getAudioTracks()[0];
 
-      if (localStream) {
-        localStream.getAudioTracks().forEach((t) => { t.stop(); localStream.removeTrack(t); });
-        localStream.addTrack(newTrack);
-        newTrack.enabled = !isMuted;
-
-        Object.values(callsRef.current).forEach((call) => {
-          const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'audio');
-          if (sender) sender.replaceTrack(newTrack);
-        });
+      if (micSourceRef.current) {
+        micSourceRef.current.disconnect();
       }
+
+      if (audioCtxRef.current && micGainRef.current) {
+        const newMicSource = audioCtxRef.current.createMediaStreamSource(new MediaStream([newTrack]));
+        newMicSource.connect(micGainRef.current);
+        micSourceRef.current = newMicSource;
+      }
+      
       showToast('Micrófono cambiado');
     } catch (err) {
       console.error('Error switching mic', err);
@@ -611,9 +663,6 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
   const containerRef = useRef<HTMLDivElement>(null);
   const isSpeaking = useAudioVolume(stream);
 
-  // Consideramos "con video" si tiene tracks, si no están muteados, y si el track no es un dummy 1x1 
-  // (aunque el dummy suele llegar sin ser detectado como nulo, la app sabrá que es un canvas si miramos algo específico, 
-  // pero el backend de canvas no envía label. Por simplicidad, evaluaremos la propiedad habilitada).
   const videoTrack = stream.getVideoTracks()[0];
   const hasRealVideo = videoTrack && videoTrack.enabled && !videoTrack.muted && videoTrack.readyState === 'live';
 
