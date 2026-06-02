@@ -430,12 +430,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             latency: 0,
           },
           audio: {
-            echoCancellation: false,
+            echoCancellation: true, // Fundamental para evitar que la otra persona se escuche a sí misma
             noiseSuppression: false,
             autoGainControl: false,
             channelCount: 2,
             sampleRate: 48000,
-          }, // Audio del sistema crudo sin filtros destructivos
+            // @ts-ignore
+            suppressLocalAudioPlayback: true, // Evitar loopback local
+          }, // Audio del sistema con cancelación de eco activada para prevenir el audio doble
         });
 
         setScreenStream(stream);
@@ -466,10 +468,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
                 // Bitrates masivos: 50Mbps para 4K, 30Mbps para 1080p, 15Mbps para 720p/480p
                 const targetBitrate = res.w >= 3840 ? 50000000 : res.w >= 1920 ? 30000000 : 15000000;
                 params.encodings[0].maxBitrate = targetBitrate;
+                (params.encodings[0] as any).minBitrate = targetBitrate / 2; // Forzar a WebRTC a mantener el bitrate
                 params.encodings[0].maxFramerate = selectedFps;
+                params.encodings[0].scaleResolutionDownBy = 1.0; // Obligar a NUNCA bajar la resolución
               }
-              // Obliga a WebRTC a NO sacrificar fotogramas si la red baja un poco, sino sacrificar resolución estática temporalmente
-              (params as any).degradationPreference = 'maintain-framerate';
+              // Prioridad absoluta a la resolución para que no se vea borroso bajo ninguna circunstancia
+              (params as any).degradationPreference = 'maintain-resolution';
               
               sender.setParameters(params);
             } catch { /* ignore */ }
