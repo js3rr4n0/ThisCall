@@ -446,8 +446,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             try {
               const params = sender.getParameters();
               if (params.encodings?.[0]) {
-                // Bitrates mucho más altos (50Mbps para 4K, 15Mbps para 1080p)
-                const targetBitrate = res.w >= 3840 ? 50000000 : res.w >= 1920 ? 15000000 : 8000000;
+                // Bitrates masivos: 50Mbps para 4K, 30Mbps para 1080p, 15Mbps para 720p/480p
+                const targetBitrate = res.w >= 3840 ? 50000000 : res.w >= 1920 ? 30000000 : 15000000;
                 params.encodings[0].maxBitrate = targetBitrate;
                 params.encodings[0].maxFramerate = selectedFps;
               }
