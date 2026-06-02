@@ -246,13 +246,6 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               if (p.peerId !== id && !callsRef.current[p.peerId]) {
                 const call = currentPeer.call(p.peerId, finalStream, {
                   metadata: { nickname: storedNickname },
-                  sdpTransform: (sdp: string) => {
-                    // Forzar audio estéreo de alta fidelidad (Discord High-Quality)
-                    return sdp.replace(
-                      /useinbandfec=1/g,
-                      'useinbandfec=1; stereo=1; sprop-stereo=1; maxaveragebitrate=510000; cbr=1'
-                    );
-                  }
                 });
                 handleCall(call);
               }
@@ -267,14 +260,7 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       });
 
       currentPeer.on('call', (call) => {
-        call.answer(finalStream, {
-          sdpTransform: (sdp: string) => {
-            return sdp.replace(
-              /useinbandfec=1/g,
-              'useinbandfec=1; stereo=1; sprop-stereo=1; maxaveragebitrate=510000; cbr=1'
-            );
-          }
-        });
+        call.answer(finalStream);
         handleCall(call);
       });
     };
@@ -712,7 +698,7 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
         autoPlay 
         playsInline 
         data-remote 
-        style={{ display: hasRealVideo ? 'block' : 'none' }} 
+        style={hasRealVideo ? { display: 'block' } : { width: 0, height: 0, opacity: 0, position: 'absolute', pointerEvents: 'none' }} 
       />
       
       {!hasRealVideo && (
