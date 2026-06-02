@@ -10,16 +10,24 @@ import type Peer from 'peerjs';
 import type { MediaConnection } from 'peerjs';
 
 /* ========== DUMMY TRACK GENERATOR ========== */
+let globalDummyCanvas: HTMLCanvasElement | null = null;
 const createDummyVideoTrack = (): MediaStreamTrack => {
-  const canvas = document.createElement('canvas');
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext('2d');
-  if (ctx) {
-    ctx.fillStyle = '#0a0a1a';
-    ctx.fillRect(0, 0, 1, 1);
+  if (!globalDummyCanvas) {
+    globalDummyCanvas = document.createElement('canvas');
+    globalDummyCanvas.width = 1;
+    globalDummyCanvas.height = 1;
+    const ctx = globalDummyCanvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#0a0a1a';
+      ctx.fillRect(0, 0, 1, 1);
+      // Animación a 1fps para evitar que WebRTC considere la pista como "muerta" o "silenciada"
+      setInterval(() => {
+        ctx.fillStyle = ctx.fillStyle === '#0a0a1a' ? '#0b0b1b' : '#0a0a1a';
+        ctx.fillRect(0, 0, 1, 1);
+      }, 1000);
+    }
   }
-  return canvas.captureStream(1).getVideoTracks()[0];
+  return globalDummyCanvas.captureStream(1).getVideoTracks()[0];
 };
 
 /* ========== AUDIO VOLUME HOOK ========== */
@@ -161,6 +169,15 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       systemGainRef.current.gain.value = sysVolume;
     }
   }, [sysVolume]);
+
+  // Sincronizar el video local automáticamente
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      if (localVideoRef.current.srcObject !== localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
+    }
+  }, [localStream, isVideoOn, screenStream]);
 
   /* ---- Show Toast ---- */
   const showToast = useCallback((msg: string) => {
@@ -473,11 +490,10 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
         // -- Optimización extrema de fluidez (60/120fps sin lag) --
         const screenVideoTrack = stream.getVideoTracks()[0];
         if ('contentHint' in screenVideoTrack) {
-          screenVideoTrack.contentHint = 'motion'; // Fuerza al navegador a priorizar FPS sobre nitidez de píxel
+          screenVideoTrack.contentHint = 'motion';
         }
 
         replaceVideoTrackGlobally(screenVideoTrack);
-        if (localVideoRef.current) localVideoRef.current.srcObject = localStream;
 
         Object.values(callsRef.current).forEach((call) => {
           const sender = call.peerConnection?.getSenders().find((s) => s.track?.kind === 'video');
@@ -591,16 +607,21 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       <div className="video-area">
         <div className="video-grid">
           <div ref={localContainerRef} className={`video-tile ${screenStream ? 'screen-share' : ''} ${isSpeaking && !isMuted ? 'speaking' : ''}`}>
-            {isVideoOn || screenStream ? (
-              <video ref={localVideoRef} autoPlay muted playsInline style={{ transform: screenStream ? 'none' : 'scaleX(-1)' }} />
-            ) : (
-              <>
-                <video ref={localVideoRef} autoPlay muted playsInline style={{ display: 'none' }} />
-                <div className="avatar-placeholder">
-                  <div className="avatar-circle">{nickname.charAt(0)}</div>
-                  <span className="avatar-name">{nickname}</span>
-                </div>
-              </>
+            <video 
+              ref={localVideoRef} 
+              autoPlay 
+              muted 
+              playsInline 
+              style={{ 
+                transform: screenStream ? 'none' : 'scaleX(-1)',
+                display: (isVideoOn || screenStream) ? 'block' : 'none'
+              }} 
+            />
+            {!(isVideoOn || screenStream) && (
+              <div className="avatar-placeholder">
+                <div className="avatar-circle">{nickname.charAt(0)}</div>
+                <span className="avatar-name">{nickname}</span>
+              </div>
             )}
             <div className="tile-label">
               {nickname} (Tú)
@@ -753,15 +774,29 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
 
   const [volume, setVolume] = useState(1);
   const [showVolume, setShowVolume] = useState(false);
+  const [isDummy, setIsDummy] = useState(true);
 
   const videoTrack = stream.getVideoTracks()[0];
-  const hasRealVideo = videoTrack && videoTrack.enabled && !videoTrack.muted && videoTrack.readyState === 'live';
+  const isReceivingVideo = videoTrack && videoTrack.enabled && !videoTrack.muted && videoTrack.readyState === 'live';
 
   useEffect(() => {
     if (audioRef.current) {
       audioRef.current.volume = volume;
     }
   }, [volume]);
+
+  // Detectar si el video recibido es el track dummy (1x1) o una transmisión real
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const checkRes = () => {
+      setIsDummy(video.videoWidth <= 1);
+    };
+
+    video.addEventListener('resize', checkRes);
+    return () => video.removeEventListener('resize', checkRes);
+  }, []);
 
   useEffect(() => {
     if (stream) {
@@ -784,10 +819,10 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
         playsInline
         muted
         data-remote 
-        style={hasRealVideo ? { display: 'block' } : { width: 0, height: 0, opacity: 0, position: 'absolute', pointerEvents: 'none' }} 
+        style={isReceivingVideo && !isDummy ? { display: 'block' } : { width: 0, height: 0, opacity: 0, position: 'absolute', pointerEvents: 'none' }} 
       />
       
-      {!hasRealVideo && (
+      {(!isReceivingVideo || isDummy) && (
         <div className="avatar-placeholder">
           <div className="avatar-circle">{nickname.charAt(0)}</div>
           <span className="avatar-name">{nickname}</span>
