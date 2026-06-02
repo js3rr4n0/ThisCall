@@ -246,6 +246,13 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
               if (p.peerId !== id && !callsRef.current[p.peerId]) {
                 const call = currentPeer.call(p.peerId, finalStream, {
                   metadata: { nickname: storedNickname },
+                  sdpTransform: (sdp: string) => {
+                    // Forzar audio estéreo de alta fidelidad (Discord High-Quality)
+                    return sdp.replace(
+                      /useinbandfec=1/g,
+                      'useinbandfec=1; stereo=1; sprop-stereo=1; maxaveragebitrate=510000; cbr=1'
+                    );
+                  }
                 });
                 handleCall(call);
               }
@@ -260,7 +267,14 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
       });
 
       currentPeer.on('call', (call) => {
-        call.answer(finalStream);
+        call.answer(finalStream, {
+          sdpTransform: (sdp: string) => {
+            return sdp.replace(
+              /useinbandfec=1/g,
+              'useinbandfec=1; stereo=1; sprop-stereo=1; maxaveragebitrate=510000; cbr=1'
+            );
+          }
+        });
         handleCall(call);
       });
     };
@@ -399,7 +413,13 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             height: { ideal: res.h },
             frameRate: { ideal: selectedFps, max: selectedFps },
           },
-          audio: true, // Audio del sistema/pestaña
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 2,
+            sampleRate: 48000,
+          }, // Audio del sistema crudo sin filtros destructivos
         });
 
         setScreenStream(stream);
