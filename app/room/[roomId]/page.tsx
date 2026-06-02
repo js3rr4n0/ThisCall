@@ -170,14 +170,12 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     }
   }, [sysVolume]);
 
-  // Sincronizar el video local automáticamente
+  // Sincronizar el video local automáticamente (solo montaje inicial)
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      if (localVideoRef.current.srcObject !== localStream) {
-        localVideoRef.current.srcObject = localStream;
-      }
+    if (localVideoRef.current && localStream && !localVideoRef.current.srcObject) {
+      localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream, isVideoOn, screenStream]);
+  }, [localStream]);
 
   /* ---- Show Toast ---- */
   const showToast = useCallback((msg: string) => {
@@ -381,6 +379,11 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     if (localStream) {
       localStream.getVideoTracks().forEach(t => localStream.removeTrack(t));
       localStream.addTrack(newTrack);
+      
+      // FORZAR ACTUALIZACIÓN DEL VIDEO LOCAL en navegadores estrictos
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = new MediaStream(localStream.getTracks());
+      }
     }
     
     Object.values(callsRef.current).forEach((call) => {
@@ -791,12 +794,22 @@ function RemoteTile({ stream, nickname, speakerDeviceId }: { stream: MediaStream
     if (!video) return;
 
     const checkRes = () => {
-      setIsDummy(video.videoWidth <= 1);
+      // Chrome a veces reporta 0x0 antes de cargar, o 1x1 para el dummy
+      setIsDummy(video.videoWidth <= 1 || video.videoHeight <= 1);
     };
 
+    checkRes();
     video.addEventListener('resize', checkRes);
-    return () => video.removeEventListener('resize', checkRes);
-  }, []);
+    video.addEventListener('loadedmetadata', checkRes);
+    
+    const interval = setInterval(checkRes, 500); // Polling por seguridad
+
+    return () => {
+      video.removeEventListener('resize', checkRes);
+      video.removeEventListener('loadedmetadata', checkRes);
+      clearInterval(interval);
+    };
+  }, [stream]);
 
   useEffect(() => {
     if (stream) {
