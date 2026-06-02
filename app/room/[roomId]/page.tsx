@@ -291,6 +291,15 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
     callsRef.current[call.peer] = call;
 
     call.on('stream', (remoteStream) => {
+      // Eliminar jitter buffer para lograr 0-delay en la transmisión
+      if (call.peerConnection) {
+        call.peerConnection.getReceivers().forEach((receiver) => {
+          if ('playoutDelayHint' in receiver) {
+            (receiver as any).playoutDelayHint = 0;
+          }
+        });
+      }
+
       setRemoteStreams((prev) => ({
         ...prev,
         [call.peer]: { stream: remoteStream, nickname: call.metadata?.nickname || 'Usuario' },
@@ -398,6 +407,8 @@ export default function RoomPage({ params }: { params: Promise<{ roomId: string 
             width: { ideal: res.w },
             height: { ideal: res.h },
             frameRate: { ideal: selectedFps, max: selectedFps },
+            // @ts-ignore
+            latency: 0,
           },
           audio: {
             echoCancellation: false,
